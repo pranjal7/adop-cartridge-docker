@@ -2,34 +2,49 @@
 def workspaceFolderName = "${WORKSPACE_NAME}"
 def projectFolderName = "${PROJECT_NAME}"
 
-// Jobs for docker file pipeline
+// Variables
+def dockerfileGitRepo = "adop-cartridge-docker-reference"
+def dockerfileGitUrl = "ssh://jenkins@gerrit:29418/${PROJECT_NAME}/" + dockerfileGitRepo
+
+// Jobs
 def getDockerfile = freeStyleJob(projectFolderName + "/Get_Dockerfile")
 def staticCodeAnalysis = freeStyleJob(projectFolderName + "/Static_Code_Analysis")
-def build = freeStyleJob(projectFolderName + "/Build")
+def dockerBuild = freeStyleJob(projectFolderName + "/Image_Build")
 def vulnerabilityScan = freeStyleJob(projectFolderName + "/Vulnerability_Scan")
 def imageTest = freeStyleJob(projectFolderName + "/Image_Test")
 def containerTest = freeStyleJob(projectFolderName + "/Container_Test")
-def publish = freeStyleJob(projectFolderName + "/Publish")
+def dockerPush = freeStyleJob(projectFolderName + "/Image_Push")
+def dockerDeploy = freeStyleJob(projectFolderName + "/Container_Deploy")
+def dockerCleanup = freeStyleJob(projectFolderName + "/Container_Cleanup")
 
 // Views
-def pipelineView1 = buildPipelineView(projectFolderName + "/Docker_Pipeline")
+def pipelineView = buildPipelineView(projectFolderName + "/Sample_Docker_CI")
 
-pipelineView1.with{
-    title('Docker Pipeline')
-    displayedBuilds(5)
+pipelineView.with{
+    title('Sample Docker Pipeline')
+    displayedBuilds(4)
     selectedJob(projectFolderName + "/Get_Dockerfile")
     showPipelineParameters()
     showPipelineDefinitionHeader()
     refreshFrequency(5)
+    alwaysAllowManualTrigger()
+    startsWithParameters()
 }
 
+// All jobs are tied to build on the Jenkins slave
+// A default set of wrappers have been used for each job
+
 getDockerfile.with{
-  description("This job downloads the Dockerfile (and local resources) from the specified repository.")
+  description("This job clones the specified local repository which contains the Dockerfile (and local resources).")
   parameters{
-    stringParam("APP_NAME",'',"Application name")
-    stringParam("APP_REPO",'',"Application repository location")
-    stringParam("APP_IMAGE",'',"Application image name")
-    stringParam("TRUSTED_REGISTRY",'',"Docker trusted registry url")
+    credentialsParam("DOCKER_LOGIN"){
+        type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
+        required()
+        description('Dockerhub username and password')
+    }
+    stringParam("IMAGE_REPO",dockerfileGitUrl,"Repository location of your Dockerfile")
+    stringParam("IMAGE_TAG",'tomcat8',"Enter a unique string to tag your images (Note: Upper case chararacters are not allowed)")
+    stringParam("CLAIR_DB",'',"URI for the Clair PostgreSQL database in the format postgresql://postgres:password@postgres:5432?sslmode=disable (ignore parameter as it is currently unsupported)")
   }
   wrappers {
     preBuildCleanup()
@@ -40,7 +55,7 @@ getDockerfile.with{
   scm{
     git{
       remote{
-        url('${APP_REPO}')
+        url('${IMAGE_REPO}')
         credentials("adop-jenkins-master")
       }
       branch("*/master")
@@ -51,10 +66,30 @@ getDockerfile.with{
       env('PROJECT_NAME',projectFolderName)
   }
   label("docker")
+  triggers {
+    gerrit {
+      events {
+          refUpdated()
+      }
+      project(projectFolderName + '/' + dockerfileGitRepo, 'plain:master')
+      configure { node ->
+          node / serverName("ADOP Gerrit")
+      }
+    }
+  }
   steps {
-    shell('''set -xe
-            |echo "Pull the Dockerfile out of Git ready for us to test and if successful release via the pipeline"
-            |set +xe'''.stripMargin())
+    shell('''set +x
+            |echo "Pull the Dockerfile out of Git, ready for us to test and if successful, release via the pipeline."
+            |
+            |# Convert tag name to lowercase letters if any uppercase letters are present since they are not allowed by Docker
+            |echo TAG=$(echo "$IMAGE_TAG" | awk '{print tolower($0)}') > build.properties
+            |
+            |# Export out credential ID to a properties file
+            |echo LOGIN=$(echo ${DOCKER_LOGIN}) >> build.properties
+            |set -x'''.stripMargin())
+    environmentVariables {
+      propertiesFile('build.properties')
+    }
   }
   publishers{
     archiveArtifacts("**/*")
@@ -64,10 +99,9 @@ getDockerfile.with{
         parameters{
           predefinedProp("B",'${BUILD_NUMBER}')
           predefinedProp("PARENT_BUILD",'${JOB_NAME}')
-          predefinedProp("APP_NAME",'${APP_NAME}')
-          predefinedProp("APP_REPO",'${APP_REPO}')
-          predefinedProp("APP_IMAGE",'${APP_IMAGE}')
-          predefinedProp("TRUSTED_REGISTRY",'${TRUSTED_REGISTRY}')
+          predefinedProp("IMAGE_TAG",'${TAG}')
+          predefinedProp("CLAIR_DB",'${CLAIR_DB}')
+          predefinedProp("DOCKER_LOGIN",'${LOGIN}')
         }
       }
     }
@@ -75,14 +109,17 @@ getDockerfile.with{
 }
 
 staticCodeAnalysis.with{
-  description("This job performs static code analysis on the Dockerfile using the redcoolbeans dockerlint image. It assumes that the Dockerfile of the downloaded repository exists in the root of the directory structure.")
+  description("This job performs static code analysis on the Dockerfile using the Redcoolbeans Dockerlint image. It assumes that the Dockerfile exists in the root of the directory structure.")
   parameters{
     stringParam("B",'',"Parent build number")
     stringParam("PARENT_BUILD","Get_Dockerfile","Parent build name")
-    stringParam("APP_NAME",'',"Application name")
-    stringParam("APP_REPO",'',"Application repository location")
-    stringParam("APP_IMAGE",'',"Application image name")
-    stringParam("TRUSTED_REGISTRY",'',"Docker trusted registry url")
+    stringParam("IMAGE_TAG",'',"Enter a unique string to tag your images e.g. your enterprise ID (Note: Upper case chararacters are not allowed)")
+    stringParam("CLAIR_DB",'',"URI for the Clair PostgreSQL database in the format postgresql://postgres:password@postgres:5432?sslmode=disable")
+    credentialsParam("DOCKER_LOGIN"){
+        type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
+        required()
+        description('Dockerhub username and password')
+    }
   }
   environmentVariables {
       env('WORKSPACE_NAME',workspaceFolderName)
@@ -101,79 +138,98 @@ staticCodeAnalysis.with{
           buildNumber('${B}')
       }
     }
-    shell('''set -x
-            |echo "Mount the Dockerfile into a container that will run Dockerlint https://github.com/projectatomic/dockerfile_lint"
+    shell('''set +x
+            |echo "Mount the Dockerfile into a container that will run Dockerlint: https://github.com/RedCoolBeans/dockerlint"
             |docker run --rm -v jenkins_slave_home:/jenkins_slave_home/ --entrypoint="dockerlint" redcoolbeans/dockerlint -f /jenkins_slave_home/$JOB_NAME/Dockerfile > ${WORKSPACE}/${JOB_NAME##*/}.out
-            |#if ! grep "Dockerfile is OK" ${WORKSPACE}/${JOB_NAME##*/}.out; then
-            |# exit 1
-            |#fi
-            |set +x'''.stripMargin())
+            |
+            |if [ ! grep "Dockerfile is OK" ${WORKSPACE}/${JOB_NAME##*/}.out ]; then
+            | echo "Dockerfile does not satisfy Dockerlint static code analysis"
+            | cat ${WORKSPACE}/${JOB_NAME##*/}.out
+            | exit 1
+            |else
+            | cat ${WORKSPACE}/${JOB_NAME##*/}.out
+            |fi
+            |
+            |echo LOGIN=$(echo ${DOCKER_LOGIN}) > credential.properties
+            |set -x'''.stripMargin())
+    environmentVariables {
+      propertiesFile('credential.properties')
+    }
   }
   publishers{
     archiveArtifacts("**/*")
     downstreamParameterized{
-      trigger(projectFolderName + "/Build"){
+      trigger(projectFolderName + "/Image_Build"){
         condition("UNSTABLE_OR_BETTER")
         parameters{
           predefinedProp("B",'${B}')
           predefinedProp("PARENT_BUILD", '${PARENT_BUILD}')
-          predefinedProp("APP_NAME",'${APP_NAME}')
-          predefinedProp("APP_REPO",'${APP_REPO}')
-          predefinedProp("APP_IMAGE",'${APP_IMAGE}')
-          predefinedProp("TRUSTED_REGISTRY",'${TRUSTED_REGISTRY}')
+          predefinedProp("IMAGE_TAG",'${IMAGE_TAG}')
+          predefinedProp("CLAIR_DB",'${CLAIR_DB}')
+          predefinedProp("DOCKER_LOGIN",'${LOGIN}')
         }
       }
     }
   }
 }
 
-build.with{
-  description("This job builds the Docker image found in the root of the downloaded repository.")
-  parameters{
+dockerBuild.with{
+	description("This job builds our dockerfile analysed in the previous step")
+	parameters{
     stringParam("B",'',"Parent build number")
     stringParam("PARENT_BUILD","Get_Dockerfile","Parent build name")
-    stringParam("APP_NAME",'',"Application name")
-    stringParam("APP_REPO",'',"Application repository location")
-    stringParam("APP_IMAGE",'',"Application image name")
-    stringParam("TRUSTED_REGISTRY",'',"Docker trusted registry url")
+    stringParam("IMAGE_TAG",'',"Enter a unique string to tag your images e.g. your enterprise ID (Note: Upper case chararacters are not allowed)")
+    stringParam("CLAIR_DB",'',"URI for the Clair PostgreSQL database in the format postgresql://postgres:password@postgres:5432?sslmode=disable")
+    credentialsParam("DOCKER_LOGIN"){
+        type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
+        required()
+        description('Dockerhub username and password')
+    }
   }
-  environmentVariables {
+	environmentVariables {
       env('WORKSPACE_NAME',workspaceFolderName)
       env('PROJECT_NAME',projectFolderName)
   }
-  wrappers {
-    preBuildCleanup()
-    injectPasswords()
-    maskPasswords()
-    sshAgent("adop-jenkins-master")
-  }
-  label("docker")
-  steps {
+	label("docker")
+	wrappers {
+		preBuildCleanup()
+		injectPasswords()
+		maskPasswords()
+		sshAgent("adop-jenkins-master")
+    credentialsBinding {
+        usernamePassword("DOCKERHUB_USERNAME", "DOCKERHUB_PASSWORD", '${DOCKER_LOGIN}')
+    }
+	}
+	steps {
     copyArtifacts('Get_Dockerfile') {
         buildSelector {
           buildNumber('${B}')
       }
     }
-    shell('''set -x
-            |echo "Build the docker container image locally"
-            |docker build -t ${APP_IMAGE}:${B} ${WORKSPACE}/.
-            |set +x'''.stripMargin())
-  }
-  publishers{
-    downstreamParameterized{
-      trigger(projectFolderName + "/Vulnerability_Scan"){
-        condition("UNSTABLE_OR_BETTER")
-        parameters{
-          predefinedProp("B",'${B}')
-          predefinedProp("PARENT_BUILD", '${PARENT_BUILD}')
-          predefinedProp("APP_NAME",'${APP_NAME}')
-          predefinedProp("APP_REPO",'${APP_REPO}')
-          predefinedProp("APP_IMAGE",'${APP_IMAGE}')
-          predefinedProp("TRUSTED_REGISTRY",'${TRUSTED_REGISTRY}')
-        }
-      }
+		shell('''set -x
+      |echo "Building the docker image locally..."
+      |docker build -t ${DOCKERHUB_USERNAME}/${IMAGE_TAG}:${B} ${WORKSPACE}/.
+      |
+      |echo LOGIN=$(echo ${DOCKER_LOGIN}) > credential.properties
+      |set +x'''.stripMargin())
+    environmentVariables {
+      propertiesFile('credential.properties')
     }
-  }
+	}
+	publishers{
+		downstreamParameterized{
+		  trigger(projectFolderName + "/Vulnerability_Scan"){
+  			condition("UNSTABLE_OR_BETTER")
+  			parameters{
+  			  predefinedProp("B",'${B}')
+  			  predefinedProp("PARENT_BUILD", '${PARENT_BUILD}')
+          predefinedProp("IMAGE_TAG",'${IMAGE_TAG}')
+          predefinedProp("CLAIR_DB",'${CLAIR_DB}')
+          predefinedProp("DOCKER_LOGIN",'${LOGIN}')
+			  }
+		  }
+		}
+	}
 }
 
 vulnerabilityScan.with{
@@ -181,16 +237,22 @@ vulnerabilityScan.with{
   parameters{
     stringParam("B",'',"Parent build number")
     stringParam("PARENT_BUILD","Get_Dockerfile","Parent build name")
-    stringParam("APP_NAME",'',"Application name")
-    stringParam("APP_REPO",'',"Application repository location")
-    stringParam("APP_IMAGE",'',"Application image name")
-    stringParam("TRUSTED_REGISTRY",'',"Docker trusted registry url")
+    stringParam("IMAGE_TAG",'',"Enter a unique string to tag your images e.g. your enterprise ID (Note: Upper case chararacters are not allowed)")
+    stringParam("CLAIR_DB",'',"URI for the Clair PostgreSQL database in the format postgresql://postgres:password@postgres:5432?sslmode=disable")
+    credentialsParam("DOCKER_LOGIN"){
+        type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
+        required()
+        description('Dockerhub username and password')
+    }
   }
   wrappers {
     preBuildCleanup()
     injectPasswords()
     maskPasswords()
     sshAgent("adop-jenkins-master")
+    credentialsBinding {
+        usernamePassword("DOCKERHUB_USERNAME", "DOCKERHUB_PASSWORD", '${DOCKER_LOGIN}')
+    }
   }
   environmentVariables {
       env('WORKSPACE_NAME',workspaceFolderName)
@@ -203,13 +265,27 @@ vulnerabilityScan.with{
           buildNumber('${B}')
       }
     }
-    shell('''set -x
-            |echo "Use the darrenajackson/analyze-local-images container to analyse the image"
-            |docker run --net=host --rm -v /tmp:/tmp -v /var/run/docker.sock:/var/run/docker.sock darrenajackson/analyze-local-images ${APP_IMAGE}:${B} > ${WORKSPACE}/${JOB_NAME##*/}.out
-            |#if ! grep "^Success! No vulnerabilities were detected in your image$" ${WORKSPACE}/${JOB_NAME##*/}.out; then
-            |# exit 1
-            |#fi
-            |set +x'''.stripMargin())
+    shell('''set +x
+            |echo "THIS STEP NEEDS TO BE UPDATED ONCE ACCESS TO A PRODUCTION CLAIR DATABASE IS AVAILABLE"
+            |
+            |if [ -z ${CLAIR_DB} ]; then
+            | echo "WARNING: You have not provided the endpoints for a Clair database, moving on for now..."
+            |else
+            | # Set up Clair as a docker container
+            | echo "Clair database endpoint: ${CLAIR_DB}"
+            | mkdir /tmp/clair_config
+            | curl -L https://raw.githubusercontent.com/coreos/clair/master/config.example.yaml -o /tmp/clair_config/config.yaml
+            | # Add the URI for your postgres database
+            | sed -i'' -e "s|options: |options: ${CLAIR_DB}|g" /tmp/clair_config/config.yaml
+            | docker run -d -p 6060-6061:6060-6061 -v /tmp/clair_config:/config quay.io/coreos/clair -config=/config/config.yaml
+            | # INSERT STEPS HERE TO RUN VULNERABILITY ANALYSIS ON IMAGE USING CLAIR API
+            |fi
+            |
+            |echo LOGIN=$(echo ${DOCKER_LOGIN}) > credential.properties
+            |set -x'''.stripMargin())
+    environmentVariables {
+      propertiesFile('credential.properties')
+    }
   }
   publishers{
     downstreamParameterized{
@@ -218,10 +294,8 @@ vulnerabilityScan.with{
         parameters{
           predefinedProp("B",'${B}')
           predefinedProp("PARENT_BUILD", '${PARENT_BUILD}')
-          predefinedProp("APP_NAME",'${APP_NAME}')
-          predefinedProp("APP_REPO",'${APP_REPO}')
-          predefinedProp("APP_IMAGE",'${APP_IMAGE}')
-          predefinedProp("TRUSTED_REGISTRY",'${TRUSTED_REGISTRY}')
+          predefinedProp("IMAGE_TAG",'${IMAGE_TAG}')
+          predefinedProp("DOCKER_LOGIN",'${LOGIN}')
         }
       }
     }
@@ -229,20 +303,25 @@ vulnerabilityScan.with{
 }
 
 imageTest.with{
-  description("This job uses a python script to analyse the output from docker inspect against a configuration file that details required parameters. It also looks for any unexpected additions to the new image being tested. The configuration file must live under tests/image-test inside the images repository and be called <application_namei>.cfg.")
+  description("This job uses a python script to analyse the output from docker inspect against a configuration file that details required parameters. It also looks for any unexpected additions to the new image being tested. The configuration file must live under tests/image-test inside the images repository.")
   parameters{
     stringParam("B",'',"Parent build number")
     stringParam("PARENT_BUILD","Get_Dockerfile","Parent build name")
-    stringParam("APP_NAME",'',"Application name")
-    stringParam("APP_REPO",'',"Application repository location")
-    stringParam("APP_IMAGE",'',"Application image name")
-    stringParam("TRUSTED_REGISTRY",'',"Docker trusted registry url")
+    stringParam("IMAGE_TAG",'',"Enter a unique string to tag your images e.g. your enterprise ID (Note: Upper case chararacters are not allowed)")
+    credentialsParam("DOCKER_LOGIN"){
+        type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
+        required()
+        description('Dockerhub username and password')
+    }
   }
   wrappers {
     preBuildCleanup()
     injectPasswords()
     maskPasswords()
     sshAgent("adop-jenkins-master")
+    credentialsBinding {
+        usernamePassword("DOCKERHUB_USERNAME", "DOCKERHUB_PASSWORD", '${DOCKER_LOGIN}')
+    }
   }
   environmentVariables {
       env('WORKSPACE_NAME',workspaceFolderName)
@@ -251,36 +330,46 @@ imageTest.with{
   label("docker")
   steps {
     copyArtifacts("Get_Dockerfile") {
-        buildSelector {
+      buildSelector {
           buildNumber('${B}')
       }
     }
     shell('''set -x
             |echo "Use the darrenajackson/image-inspector container to inspect the image"
-            |# set test file directory
+            |# Set test file directory
             |export TESTS_PATH="tests/image-test"
-            |# set directory where $TESTS_PATH will be mounted inside container
+            |
+            |# Set directory where $TESTS_PATH will be mounted inside container
             |export TEST_DIR="/tmp"
-            |# set path workspace is available from inside docker machine
+            |
+            |# Set path workspace is available from inside docker machine
             |export docker_workspace_dir=$(echo ${WORKSPACE} | sed 's#/workspace#/var/lib/docker/volumes/jenkins_slave_home/_data#')
-            |docker run --net=host --rm -v ${docker_workspace_dir}/${TESTS_PATH}/:${TEST_DIR} -v /var/run/docker.sock:/var/run/docker.sock darrenajackson/image-inspector -i ${APP_IMAGE}:${B} -f ${TEST_DIR}/${APP_NAME}.cfg > ${WORKSPACE}/${JOB_NAME##*/}.out
-            |#if grep "ERROR" ${WORKSPACE}/${JOB_NAME##*/}.out; then
-            |# exit 1
-            |#fi
+            |
+            |docker run --net=host --rm -v ${docker_workspace_dir}/${TESTS_PATH}/:${TEST_DIR} -v /var/run/docker.sock:/var/run/docker.sock darrenajackson/image-inspector -i  ${DOCKERHUB_USERNAME}/${IMAGE_TAG}:${B} -f ${TEST_DIR}/image.cfg > ${WORKSPACE}/${JOB_NAME##*/}.out
+            |
+            |if grep "ERROR" ${WORKSPACE}/${JOB_NAME##*/}.out; then
+            | echo "Your built image has failed testing..." 
+            | cat ${WORKSPACE}/${JOB_NAME##*/}.out
+            | exit 1
+            |else
+            | cat ${WORKSPACE}/${JOB_NAME##*/}.out
+            |fi
+            |
+            |echo LOGIN=$(echo ${DOCKER_LOGIN}) > credential.properties
             |set +x'''.stripMargin())
+    environmentVariables {
+      propertiesFile('credential.properties')
+    }
   }
   publishers{
-    archiveArtifacts("**/*")
     downstreamParameterized{
       trigger(projectFolderName + "/Container_Test"){
         condition("UNSTABLE_OR_BETTER")
         parameters{
           predefinedProp("B",'${B}')
-          predefinedProp("PARENT_BUILD",'${PARENT_BUILD}')
-          predefinedProp("APP_NAME",'${APP_NAME}')
-          predefinedProp("APP_REPO",'${APP_REPO}')
-          predefinedProp("APP_IMAGE",'${APP_IMAGE}')
-          predefinedProp("TRUSTED_REGISTRY",'${TRUSTED_REGISTRY}')
+          predefinedProp("PARENT_BUILD", '${PARENT_BUILD}')
+          predefinedProp("IMAGE_TAG",'${IMAGE_TAG}')
+          predefinedProp("DOCKER_LOGIN",'${LOGIN}')
         }
       }
     }
@@ -292,16 +381,21 @@ containerTest.with{
   parameters{
     stringParam("B",'',"Parent build number")
     stringParam("PARENT_BUILD","Get_Dockerfile","Parent build name")
-    stringParam("APP_NAME",'',"Application name")
-    stringParam("APP_REPO",'',"Application repository location")
-    stringParam("APP_IMAGE",'',"Application image name")
-    stringParam("TRUSTED_REGISTRY",'',"Docker trusted registry url")
+    stringParam("IMAGE_TAG",'',"Enter a unique string to tag your images e.g. your enterprise ID (Note: Upper case chararacters are not allowed)")
+    credentialsParam("DOCKER_LOGIN"){
+        type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
+        required()
+        description('Dockerhub username and password')
+    }
   }
   wrappers {
     preBuildCleanup()
     injectPasswords()
     maskPasswords()
     sshAgent("adop-jenkins-master")
+    credentialsBinding {
+        usernamePassword("DOCKERHUB_USERNAME", "DOCKERHUB_PASSWORD", '${DOCKER_LOGIN}')
+    }
   }
   environmentVariables {
       env('WORKSPACE_NAME',workspaceFolderName)
@@ -310,94 +404,121 @@ containerTest.with{
   label("docker")
   steps {
     copyArtifacts("Get_Dockerfile") {
-        buildSelector {
+      buildSelector {
           buildNumber('${B}')
       }
     }
     shell('''set -x
-            |echo "Build a new test image installing required applications, run test suite and destroy the new image and container at the end of the tests"
-            |# set test file directory
+            |echo "Building a new test image installing required applications, running test suite and destroying the new image and container at the end of the tests..."
+            |# Set test file directory
             |export TESTS_PATH="tests/container-test"
-            |# set testing docker file info
+            |
+            |# Set testing docker file info
             |export TEST_DF_PATH="${WORKSPACE}/${TESTS_PATH}/dockerfile"
             |export TEST_DF_NAME="Dockerfile.test"
             |export TEST_DF="${TEST_DF_PATH}/${TEST_DF_NAME}"
-            |# set file containing list of environment variables
+            |
+            |# Set file containing list of environment variables
             |export TEST_ENVS="${WORKSPACE}/${TESTS_PATH}/envs/envs.cfg"
-            |# test image name extension
+            |
+            |# Test image name extension
             |export IMG_EXT="test"
-            |# test image tag
+            |
+            |# Test image tag
             |export IMG_TAG=${B}
-            |# set directory where $TESTS_PATH will be mounted inside container
+            |
+            |# Set directory where $TESTS_PATH will be mounted inside container
             |export TEST_DIR="/var/tmp"
-            |# set path workspace is available from inside docker machine
+            |
+            |# Set path workspace is available from inside docker machine
             |export docker_workspace_dir=$(echo ${WORKSPACE} | sed 's#/workspace#/var/lib/docker/volumes/jenkins_slave_home/_data#')
-            |# source environment variables needed for test dockerfile generation
+            |
+            |# Source environment variables needed for test dockerfile generation
             |source ${WORKSPACE}/${TESTS_PATH}/dockerfile/dockerfile_envs.sh
-            |# create test Dockerfile
+            |
+            |# Create test Dockerfile
             |if ! [[ -f ${TEST_DF} ]]; then
             |  cat << EOF > ${TEST_DF}
-            |FROM ${APP_IMAGE}:${B}
+            |FROM  ${DOCKERHUB_USERNAME}/${IMAGE_TAG}:${B}
             |
             |RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ${PACK_LIST} && apt-get clean && rm -rf /var/lib/apt/lists/*
             |
             |EOF
             |fi
-            |# if the environment variable file exists add them to the dockerfile
+            |
+            |# If the environment variable file exists add them to the dockerfile
             |if [[ -f ${TEST_ENVS} ]]; then
             |  cat ${TEST_ENVS} >> ${TEST_DF}
             |fi
-            |# build the test images
-            |docker build -t ${APP_IMAGE}-${IMG_EXT}:${IMG_TAG} -f ${TEST_DF} ${TEST_DF_PATH}
-            |# run the test image
-            |docker run -d --name ${APP_NAME}-${IMG_EXT} -v ${docker_workspace_dir}/${TESTS_PATH}/:${TEST_DIR} ${APP_IMAGE}-${IMG_EXT}:${IMG_TAG}
-            |# allow the container time to start
+            |
+            |# Build the test images
+            |docker build -t ${IMAGE_TAG}-${IMG_EXT}:${IMG_TAG} -f ${TEST_DF} ${TEST_DF_PATH}
+            |
+            |# Run the test image
+            |docker run -d --name ${IMAGE_TAG}-${IMG_EXT} -v ${docker_workspace_dir}/${TESTS_PATH}/:${TEST_DIR} ${IMAGE_TAG}-${IMG_EXT}:${IMG_TAG}
+            |
+            |# Allow the container time to start
             |sleep 60
-            |# execute the testing scripts
-            |docker exec ${APP_NAME}-${IMG_EXT} ${TEST_DIR}/container_tests.sh ${TEST_DIR} > ${WORKSPACE}/${JOB_NAME##*/}.out
-            |# stop and clean up the testing container and testing image
-            |docker stop ${APP_NAME}-${IMG_EXT} && docker rm -v ${APP_NAME}-${IMG_EXT} && docker rmi ${APP_IMAGE}-${IMG_EXT}:${IMG_TAG}
-            |#if grep "^-" ${WORKSPACE}/${JOB_NAME##*/}.out; then
-            |# exit 1
-            |#fi
+            |
+            |# Execute the testing scripts
+            |docker exec ${IMAGE_TAG}-${IMG_EXT} chmod -R +x ${TEST_DIR}
+            |docker exec ${IMAGE_TAG}-${IMG_EXT} ${TEST_DIR}/container_tests.sh ${TEST_DIR} > ${WORKSPACE}/${JOB_NAME##*/}.out
+            |
+            |# Stop and clean up the testing container and testing image
+            |docker stop ${IMAGE_TAG}-${IMG_EXT} && docker rm -v ${IMAGE_TAG}-${IMG_EXT} && docker rmi ${IMAGE_TAG}-${IMG_EXT}:${IMG_TAG}
+            |
+            |if grep "^-" ${WORKSPACE}/${JOB_NAME##*/}.out; then
+            | echo "Note: some warnings/errors found..."
+            | if grep -E "expected port closed|expected process incorrect owner|expected process incorrect owner" ${WORKSPACE}/${JOB_NAME##*/}.out; then
+            |   echo "Your container has failed testing..."
+            |   exit 1
+            | fi
+            | echo "Some unexpected ports/processes found, moving on for now..."
+            |else
+            | cat ${WORKSPACE}/${JOB_NAME##*/}.out
+            | echo "Container has successfully passed testing..."
+            |fi
+            |
+            |echo LOGIN=$(echo ${DOCKER_LOGIN}) > credential.properties
             |set -x'''.stripMargin())
+    environmentVariables {
+      propertiesFile('credential.properties')
+    }
   }
   publishers{
-    archiveArtifacts("**/*")
     downstreamParameterized{
-      trigger(projectFolderName + "/Publish"){
+      trigger(projectFolderName + "/Image_Push"){
         condition("UNSTABLE_OR_BETTER")
         parameters{
           predefinedProp("B",'${B}')
-          predefinedProp("PARENT_BUILD",'${PARENT_BUILD}')
-          predefinedProp("APP_NAME",'${APP_NAME}')
-          predefinedProp("APP_REPO",'${APP_REPO}')
-          predefinedProp("APP_IMAGE",'${APP_IMAGE}')
-          predefinedProp("TRUSTED_REGISTRY",'${TRUSTED_REGISTRY}')
+          predefinedProp("PARENT_BUILD", '${PARENT_BUILD}')
+          predefinedProp("IMAGE_TAG",'${IMAGE_TAG}')
+          predefinedProp("DOCKER_LOGIN",'${LOGIN}')
         }
       }
     }
   }
 }
 
-publish.with{
-  description("This job pushes the new image that has been fully tested to the registry (not the test image from the containerTest).")
+dockerPush.with{
+  description("This job pushed the fully tested Docker image to Dockerhub.")
   parameters{
     stringParam("B",'',"Parent build number")
-    stringParam("PARENT_BUILD","Get_Dockerfile","Parent build name")
-    stringParam("APP_NAME",'',"Application name")
-    stringParam("APP_REPO",'',"Application repository location")
-    stringParam("APP_IMAGE",'',"Application image name")
-    stringParam("TRUSTED_REGISTRY",'',"Docker trusted registry url")
+    stringParam("PARENT_BUILD","Docker_Build","Parent build name")
+    stringParam("IMAGE_TAG",'',"Enter a unique string to tag your images e.g. your enterprise ID (Note: Upper case chararacters are not allowed)")
+    credentialsParam("DOCKER_LOGIN"){
+        type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
+        required()
+        description('Dockerhub username and password')
+    }
   }
   wrappers {
     preBuildCleanup()
     injectPasswords()
     maskPasswords()
     sshAgent("adop-jenkins-master")
-    credentialsBinding{
-      string("docker_email", "dockerhub-email")
-      string("docker_auth", "dockerhub-auths")
+    credentialsBinding {
+        usernamePassword("DOCKERHUB_USERNAME", "DOCKERHUB_PASSWORD", '${DOCKER_LOGIN}')
     }
   }
   environmentVariables {
@@ -406,38 +527,109 @@ publish.with{
   }
   label("docker")
   steps {
-    copyArtifacts("Get_Dockerfile") {
-        buildSelector {
-          buildNumber('${B}')
+    shell('''set +x
+      |docker login -u ${DOCKERHUB_USERNAME} -p ${DOCKERHUB_PASSWORD} -e devops@adop.com
+      |docker push ${DOCKERHUB_USERNAME}/${IMAGE_TAG}:${B}
+      |
+      |echo LOGIN=$(echo ${DOCKER_LOGIN}) > credential.properties
+      |set -x'''.stripMargin())
+    environmentVariables {
+      propertiesFile('credential.properties')
+    }
+  }
+  publishers{
+    downstreamParameterized{
+      trigger(projectFolderName + "/Container_Deploy"){
+        condition("UNSTABLE_OR_BETTER")
+        parameters{
+          predefinedProp("B",'${B}')
+          predefinedProp("PARENT_BUILD",'${PARENT_BUILD}')
+          predefinedProp("IMAGE_TAG",'${IMAGE_TAG}')
+          predefinedProp("DOCKER_LOGIN",'${LOGIN}')
+        }
       }
     }
-    shell('''set -x
-            |echo "pushing the new image to the registry"
-            |# dockerhub authentication file generation
-            |export DOCKER_CONF_DIR="/root/.docker"
-            |export DOCKER_CONF_FILE="config.json"
-            |export DOCKER_CONF="${DOCKER_CONF_DIR}/${DOCKER_CONF_FILE}"
-            |touch ${WORKSPACE}/${DOCKER_CONF_FILE}
-            |cat <<EOF > ${WORKSPACE}/${DOCKER_CONF_FILE}
-            |{
-            |    "auths": {
-            |        "${TRUSTED_REGISTRY}": {
-            |            "auth": "${docker_auth}",
-            |            "email": "${docker_email}"
-            |        }
-            |    }
-            |}
-            |EOF
-            |# copy dockerhub authentication file into jenkins-slave container
-            |docker cp ${WORKSPACE}/${DOCKER_CONF_FILE} jenkins-slave:${DOCKER_CONF}
-            |# push the new image to dockerhub
-            |docker push ${APP_IMAGE}:${B}
-            |# tidy up and delete image pushed to dockerhub
-            |docker rmi ${APP_IMAGE}:${B}
-            |# clean up dockerhub authentication file in jenkins-slave
-            |docker exec jenkins-slave rm -f ${DOCKER_CONF}
-            |# clean up dockerhub authentication file in workspace
-            |rm -f ${WORKSPACE}/${DOCKER_CONF_FILE}
-            |set +x'''.stripMargin())
+  }
+}
+
+dockerDeploy.with{
+  description("This job deploys the Docker image pushed in the previous job in a container.")
+  parameters{
+    stringParam("B",'',"Parent build number")
+    stringParam("PARENT_BUILD","Docker_Build","Parent build name")
+    stringParam("IMAGE_TAG",'',"Enter a unique string to tag your images e.g. your enterprise ID (Note: Upper case chararacters are not allowed)")
+    credentialsParam("DOCKER_LOGIN"){
+        type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
+        required()
+        description('Dockerhub username and password')
+    }
+  }
+  wrappers {
+    preBuildCleanup()
+    injectPasswords()
+    maskPasswords()
+    sshAgent("adop-jenkins-master")
+    credentialsBinding {
+        usernamePassword("DOCKERHUB_USERNAME", "DOCKERHUB_PASSWORD", '${DOCKER_LOGIN}')
+    }
+  }
+  environmentVariables {
+      env('WORKSPACE_NAME',workspaceFolderName)
+      env('PROJECT_NAME',projectFolderName)
+  }
+  label("docker")
+  steps {
+    shell('''set +x
+      |docker login -u ${DOCKERHUB_USERNAME} -p ${DOCKERHUB_PASSWORD} -e devops@adop.com
+      |docker run -d --name jenkins_${IMAGE_TAG}_${B} ${DOCKERHUB_USERNAME}/${IMAGE_TAG}:${B}
+      |
+      |set -x'''.stripMargin())
+  }
+  publishers{
+    buildPipelineTrigger(projectFolderName + "/Container_Cleanup") {
+      parameters {
+          predefinedProp("B",'${B}')
+          predefinedProp("PARENT_BUILD",'${PARENT_BUILD}')
+          predefinedProp("IMAGE_TAG",'${IMAGE_TAG}')
+      }
+    }
+  }
+}
+
+dockerCleanup.with{
+  description("This job cleans up any existing deployed containers (has to be run manually).")
+  parameters{
+    stringParam("B",'',"Parent build number")
+    stringParam("PARENT_BUILD","Docker_Build","Parent build name")
+    stringParam("IMAGE_TAG",'tomcat8',"Enter the string value which you entered to tag your images (Note: Upper case chararacters are not allowed)")
+    choiceParam('CONTAINER_DELETION', ['SINGLE', 'ALL'], 'Choose whether to delete the container created by this run of the pipeline or all the containers created by each run of the pipeline.')
+  }
+  wrappers {
+    preBuildCleanup()
+    injectPasswords()
+    maskPasswords()
+    sshAgent("adop-jenkins-master")
+  }
+  environmentVariables {
+      env('WORKSPACE_NAME',workspaceFolderName)
+      env('PROJECT_NAME',projectFolderName)
+  }
+  label("docker")
+  steps {
+    shell('''set +x
+      |# Checking to see whether to delete all containers or just one
+      |if [ ${CONTAINER_DELETION} = "SINGLE" ]; then
+      |  echo "Deleting single container..."
+      |  docker rm -f jenkins_${IMAGE_TAG}_${B}
+      |elif [ ${CONTAINER_DELETION} = "ALL" ]; then
+      |   echo "Deleting all containers..."
+      |   for i in `seq 1 ${B}`;
+      |     do
+      |      if docker ps -a | grep "jenkins_${IMAGE_TAG}_${i}"; then
+      |          docker rm -f jenkins_${IMAGE_TAG}_${i}
+      |        fi
+      |     done    
+      |fi
+      |set -x'''.stripMargin())
   }
 }
