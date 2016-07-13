@@ -40,7 +40,8 @@ getDockerfile.with{
     credentialsParam("DOCKER_LOGIN"){
         type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
         required()
-        description('Dockerhub username and password')
+        defaultValue('docker-credentials')
+        description('Dockerhub username and password. Please make sure the credentials are added with ID "docker-credentials"')
     }
     stringParam("IMAGE_REPO",dockerfileGitUrl,"Repository location of your Dockerfile")
     stringParam("IMAGE_TAG",'tomcat8',"Enter a unique string to tag your images (Note: Upper case chararacters are not allowed)")
@@ -118,7 +119,8 @@ staticCodeAnalysis.with{
     credentialsParam("DOCKER_LOGIN"){
         type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
         required()
-        description('Dockerhub username and password')
+        defaultValue('docker-credentials')
+        description('Dockerhub username and password. Please make sure the credentials are added with ID "docker-credentials"')
     }
   }
   environmentVariables {
@@ -182,8 +184,8 @@ dockerBuild.with{
     stringParam("CLAIR_DB",'',"URI for the Clair PostgreSQL database in the format postgresql://postgres:password@postgres:5432?sslmode=disable")
     credentialsParam("DOCKER_LOGIN"){
         type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
-        required()
-        description('Dockerhub username and password')
+        defaultValue('docker-credentials')
+        description('Dockerhub username and password. Please make sure the credentials are added with ID "docker-credentials"')
     }
   }
 	environmentVariables {
@@ -241,8 +243,8 @@ vulnerabilityScan.with{
     stringParam("CLAIR_DB",'',"URI for the Clair PostgreSQL database in the format postgresql://postgres:password@postgres:5432?sslmode=disable")
     credentialsParam("DOCKER_LOGIN"){
         type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
-        required()
-        description('Dockerhub username and password')
+        defaultValue('docker-credentials')
+        description('Dockerhub username and password. Please make sure the credentials are added with ID "docker-credentials"')
     }
   }
   wrappers {
@@ -310,8 +312,8 @@ imageTest.with{
     stringParam("IMAGE_TAG",'',"Enter a unique string to tag your images e.g. your enterprise ID (Note: Upper case chararacters are not allowed)")
     credentialsParam("DOCKER_LOGIN"){
         type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
-        required()
-        description('Dockerhub username and password')
+        defaultValue('docker-credentials')
+        description('Dockerhub username and password. Please make sure the credentials are added with ID "docker-credentials"')
     }
   }
   wrappers {
@@ -384,8 +386,8 @@ containerTest.with{
     stringParam("IMAGE_TAG",'',"Enter a unique string to tag your images e.g. your enterprise ID (Note: Upper case chararacters are not allowed)")
     credentialsParam("DOCKER_LOGIN"){
         type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
-        required()
-        description('Dockerhub username and password')
+        defaultValue('docker-credentials')
+        description('Dockerhub username and password. Please make sure the credentials are added with ID "docker-credentials"')
     }
   }
   wrappers {
@@ -508,8 +510,8 @@ dockerPush.with{
     stringParam("IMAGE_TAG",'',"Enter a unique string to tag your images e.g. your enterprise ID (Note: Upper case chararacters are not allowed)")
     credentialsParam("DOCKER_LOGIN"){
         type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
-        required()
-        description('Dockerhub username and password')
+        defaultValue('docker-credentials')
+        description('Dockerhub username and password. Please make sure the credentials are added with ID "docker-credentials"')
     }
   }
   wrappers {
@@ -560,8 +562,8 @@ dockerDeploy.with{
     stringParam("IMAGE_TAG",'',"Enter a unique string to tag your images e.g. your enterprise ID (Note: Upper case chararacters are not allowed)")
     credentialsParam("DOCKER_LOGIN"){
         type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
-        required()
-        description('Dockerhub username and password')
+        defaultValue('docker-credentials')
+        description('Dockerhub username and password. Please make sure the credentials are added with ID "docker-credentials"')
     }
   }
   wrappers {
