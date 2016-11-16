@@ -144,7 +144,7 @@ staticCodeAnalysis.with{
             |echo "Mount the Dockerfile into a container that will run Dockerlint: https://github.com/RedCoolBeans/dockerlint"
             |docker run --rm -v jenkins_slave_home:/jenkins_slave_home/ --entrypoint="dockerlint" redcoolbeans/dockerlint -f /jenkins_slave_home/$JOB_NAME/Dockerfile > ${WORKSPACE}/${JOB_NAME##*/}.out
             |
-            |if [ ! grep "Dockerfile is OK" ${WORKSPACE}/${JOB_NAME##*/}.out ]; then
+            |if ! grep "Dockerfile is OK" ${WORKSPACE}/${JOB_NAME##*/}.out ; then
             | echo "Dockerfile does not satisfy Dockerlint static code analysis"
             | cat ${WORKSPACE}/${JOB_NAME##*/}.out
             | exit 1
@@ -152,7 +152,7 @@ staticCodeAnalysis.with{
             | cat ${WORKSPACE}/${JOB_NAME##*/}.out
             |fi
             |
-            |echo LOGIN=$(echo ${DOCKER_LOGIN}) > credential.properties
+            |echo "LOGIN=${DOCKER_LOGIN}" > credential.properties
             |set -x'''.stripMargin())
     environmentVariables {
       propertiesFile('credential.properties')
@@ -350,7 +350,7 @@ imageTest.with{
             |docker run --net=host --rm -v ${docker_workspace_dir}/${TESTS_PATH}/:${TEST_DIR} -v /var/run/docker.sock:/var/run/docker.sock darrenajackson/image-inspector -i  ${DOCKERHUB_USERNAME}/${IMAGE_TAG}:${B} -f ${TEST_DIR}/image.cfg > ${WORKSPACE}/${JOB_NAME##*/}.out
             |
             |if grep "ERROR" ${WORKSPACE}/${JOB_NAME##*/}.out; then
-            | echo "Your built image has failed testing..." 
+            | echo "Your built image has failed testing..."
             | cat ${WORKSPACE}/${JOB_NAME##*/}.out
             | exit 1
             |else
@@ -630,7 +630,7 @@ dockerCleanup.with{
       |      if docker ps -a | grep "jenkins_${IMAGE_TAG}_${i}"; then
       |          docker rm -f jenkins_${IMAGE_TAG}_${i}
       |        fi
-      |     done    
+      |     done
       |fi
       |set -x'''.stripMargin())
   }
