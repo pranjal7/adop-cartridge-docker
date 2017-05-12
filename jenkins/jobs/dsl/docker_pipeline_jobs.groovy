@@ -8,6 +8,7 @@ def dockerfileGitUrl = "ssh://jenkins@gerrit:29418/${PROJECT_NAME}/" + dockerfil
 
 // Jobs
 def getDockerfile = freeStyleJob(projectFolderName + "/Get_Dockerfile")
+def printDockerfile = freeStyleJob(PROJECT_NAME + "/Print_Dockerfile")
 def staticCodeAnalysis = freeStyleJob(projectFolderName + "/Static_Code_Analysis")
 def dockerBuild = freeStyleJob(projectFolderName + "/Image_Build")
 def vulnerabilityScan = freeStyleJob(projectFolderName + "/Vulnerability_Scan")
@@ -95,7 +96,7 @@ getDockerfile.with{
   publishers{
     archiveArtifacts("**/*")
     downstreamParameterized{
-      trigger(projectFolderName + "/Static_Code_Analysis"){
+      trigger(projectFolderName + "/Print_Dockerfile"){
         condition("UNSTABLE_OR_BETTER")
         parameters{
           predefinedProp("B",'${BUILD_NUMBER}')
@@ -108,7 +109,54 @@ getDockerfile.with{
     }
   }
 }
-
+print_Dockerfile.with{
+  description("This job prints out the contents of the docker file")
+  parameters{stringParam("B",'',"Parent build number")
+    stringParam("PARENT_BUILD","Get_Dockerfile","Parent build name")
+    stringParam("IMAGE_TAG",'',"Enter a unique string to tag your images e.g. your enterprise ID (Note: Upper case chararacters are not allowed)")
+    stringParam("CLAIR_DB",'',"URI for the Clair PostgreSQL database in the format postgresql://postgres:password@postgres:5432?sslmode=disable")
+    credentialsParam("DOCKER_LOGIN"){
+        type('com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl')
+        required()
+        defaultValue('docker-credentials')
+        description('Dockerhub username and password. Please make sure the credentials are added with ID "docker-credentials"')
+        }
+        environmentVariables {
+      env('WORKSPACE_NAME',workspaceFolderName)
+      env('PROJECT_NAME',projectFolderName)
+  }
+  wrappers {
+    preBuildCleanup()
+    injectPasswords()
+    maskPasswords()
+    sshAgent("adop-jenkins-master")
+  }
+  label("docker")
+  steps {
+    copyArtifacts('Get_Dockerfile') {
+        buildSelector {
+          buildNumber('${B}')
+      }
+      shell('''set +x
+      | echo "We are printing the Docker File"
+      | cat Dockerfile
+      | set -x ''').stripMargin
+}
+publishers{
+    archiveArtifacts("**/*")
+    downstreamParameterized{
+      trigger(projectFolderName + "/Static_Code_Analysis"){
+        condition("UNSTABLE_OR_BETTER")
+        parameters{
+          predefinedProp("B",'${B}')
+          predefinedProp("PARENT_BUILD", '${PARENT_BUILD}')
+          predefinedProp("IMAGE_TAG",'${IMAGE_TAG}')
+          predefinedProp("CLAIR_DB",'${CLAIR_DB}')
+          predefinedProp("DOCKER_LOGIN",'${LOGIN}')
+        }
+      }
+    }
+  }
 staticCodeAnalysis.with{
   description("This job performs static code analysis on the Dockerfile using the Redcoolbeans Dockerlint image. It assumes that the Dockerfile exists in the root of the directory structure.")
   parameters{
@@ -135,7 +183,7 @@ staticCodeAnalysis.with{
   }
   label("docker")
   steps {
-    copyArtifacts('Get_Dockerfile') {
+    copyArtifacts('Print_Dockerfile') {
         buildSelector {
           buildNumber('${B}')
       }
