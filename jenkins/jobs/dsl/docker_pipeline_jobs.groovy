@@ -158,6 +158,7 @@ publishers{
       }
     }
   }
+  }
 staticCodeAnalysis.with{
   description("This job performs static code analysis on the Dockerfile using the Redcoolbeans Dockerlint image. It assumes that the Dockerfile exists in the root of the directory structure.")
   parameters{
