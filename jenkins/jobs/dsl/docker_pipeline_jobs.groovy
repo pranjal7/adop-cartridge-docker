@@ -141,6 +141,7 @@ print_Dockerfile.with{
       | echo "We are printing the Docker File"
       | cat Dockerfile
       | set -x ''').stripMargin
+    }
 }
 publishers{
     archiveArtifacts("**/*")
